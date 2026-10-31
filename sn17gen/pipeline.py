@@ -34,6 +34,9 @@ CHAIN_CREDITS = 1_350_000
 CHAIN_CALLS = CALLS + REPAIRS + PROVIDER_RETRIES
 ID_BLOCK = 100
 FINAL_IDS = 900
+FINAL_REFINE_ID = 950
+FINAL_REFINES = 2
+FINAL_REFINE_CREDITS = 600_000
 TOTAL_CREDITS = 4_600_000  # the frozen budget is 5,000,000 credits and 60 calls per prompt
 _CHARGE_LOCK = threading.Lock()
 _TRACE_LOCK = threading.Lock()
@@ -211,6 +214,18 @@ def _panel(witness, renderer, ref: bytes, modules: list[str]) -> str:
     return modules[min(range(n), key=lambda i: (total[i], i))]
 
 
+def _final_refine(witness, renderer, ref: bytes, best: str, sheet: bytes, request_id: int) -> tuple[str, bytes]:
+    """One more refinement of the picked module against the four camera views; kept only if it renders."""
+    ledger = Ledger(credit_cap=FINAL_REFINE_CREDITS + 1, call_cap=1)
+    js = extract(_call(witness, ledger, request_id, "final", prompts.REFINE_USER % best, [ref, sheet],
+                       effort=REFINE_EFFORT))
+    wrapped = wrap(js) if js is not None else None
+    if wrapped is None:
+        return best, sheet
+    new_sheet, err = _sheet_or_error(renderer, wrapped)
+    return (best, sheet) if err is not None else (js, new_sheet)
+
+
 def run(image: bytes, seed: int, witness, renderer) -> str | None:
     ref = _png(image)
     key = hashlib.sha256(image).hexdigest()[:16]
@@ -231,6 +246,12 @@ def run(image: bytes, seed: int, witness, renderer) -> str | None:
         best = _panel(witness, renderer, ref, found)
     else:
         best = found[0] if found else None
+    if best is not None:
+        sheet = next(c.best_sheet for c in chains if c.best is best)
+        for k in range(FINAL_REFINES):
+            if spent + 2 * EXPECTED_PANEL_CREDITS + (k + 1) * FINAL_REFINE_CREDITS > TOTAL_CREDITS:
+                break
+            best, sheet = _final_refine(witness, renderer, ref, best, sheet, FINAL_REFINE_ID + k)
     out = final(best) if best is not None else None
     _trace(key, "final", out)
     if out is None:
